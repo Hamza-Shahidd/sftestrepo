@@ -4,7 +4,7 @@
 
 public class CaseGNCaseHandler extends TriggerHandler {
     public override void beforeInsert(TriggerContext context) {
-        executeActions(context);
+        executeActions(context); // new change 2
     }
     
     public override void beforeUpdate(TriggerContext context) {
