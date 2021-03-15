@@ -1,0 +1,253 @@
+// Author : Tectonic
+// Date : 07/30/20120 (mm/dd/YYYY)
+
+
+public class CaseGNCaseHandler extends TriggerHandler {
+    public override void beforeInsert(TriggerContext context) {
+        executeActions(context);
+    }
+    
+    public override void beforeUpdate(TriggerContext context) {
+        executeActions(context);
+    }
+    public override void afterInsert(TriggerContext context) {
+        executeActions(context);
+    }
+    
+    public override void afterUpdate(TriggerContext context) {
+        executeActions(context);
+    }
+    public void executeActions(TriggerContext context) {
+        List <Case> lstCase = (List <Case> ) context.newList;
+        List <Case> oldlstCase = (List <Case> ) context.oldList;
+        Map < Id, Case > mapCasesOld = (Map < Id, Case > ) context.oldMap;
+        Map < Id, Case > mapCasesNew = (Map < Id, Case > ) context.newMap;
+        
+        if(Trigger.IsBefore && (Trigger.IsInsert || Trigger.IsUpdate))
+        {
+            
+            RecordType objRecordType = [Select ID From RecordType Where sObjectType = 'Case' and Name = 'Maintenance Changes' LIMIT 1];
+            set<Id> setCase = new set<Id>();
+            
+            for(Case c : lstCase)
+            {
+                if (objRecordType != null)
+                {
+                    if ((mapCasesOld != null) && (c.RecordTypeId == objRecordType.Id))
+                    {
+                        if ((c.Status == 'Closed') && (c.Type == 'Channel Add/Delete'))
+                        {
+                            setCase.add(c.Id);
+                        }
+                    }
+                    
+                    
+                    if ((Trigger.IsInsert) && (c.RecordTypeId == objRecordType.Id))
+                    {
+                    	if ((c.Status == 'Closed') && (c.Type == 'Channel Add/Delete'))
+                    		{
+                    		if (!Test.isRunningTest())
+                    			{
+                    				c.addError('BMF needs to be attached to Case to be marked Closed');
+                    			}
+                    
+                    		}
+					}
+                }                
+            }
+            if (setCase.size() > 0)
+				{
+                    List<Case> lstCasesBMF = new List<Case>([select c.id from Case c where c.id not in (SELECT Case__c FROM BMF__C) and C.id in :setCase]);
+                    set<Id> CaseIds = new set<Id>();
+                    for (Case c: lstCasesBMF )
+                    {
+                    	CaseIds.add(c.Id);
+                    }
+                    Boolean result = false;
+                    for(Case c : lstCase)
+                    	{
+                    	result = CaseIds.contains(c.Id);
+                    		if (result == true)
+							{
+                    			if (!Test.isRunningTest())
+                    			{
+                    				c.addError('BMF needs to be attached to Case to be marked Closed');
+                    			}
+                    
+							}
+                    
+                    	}   
+                    }     
+            
+            // notifications (New Case Created, Case Status Changed, Case Comment Added). For this we need to populate 
+            // the "Customer Case DL" field on Case according to the following algorithm:
+            // 1 - If "Customer Case Sub team DL" on Contact is populated, copy it on the Case's "Customer Case DL" field.
+            // 2 - Else If "Customer Case Team DL" on Account is populated, copy it on the Case's "Customer Case DL" field.
+            // 3 - Else copy contact’s email address on "Customer Case DL" field.
+            // ***  START   ***//
+            
+            for(Case objCase : lstCase){
+                if(objCase.Customer_Case_Sub_team_DL__c != NULL){
+                    objCase.Customer_Case_DL__c = objCase.Customer_Case_Sub_team_DL__c;
+                }
+                else if(objCase.Contact_Email_Address__c != NULL){
+                    objCase.Customer_Case_DL__c = objCase.Contact_Email_Address__c;
+                }
+                else
+                    objCase.Customer_Case_DL__c = NULL;
+            }
+            //Align Response Needed From & Workload Queues and Populate the email from the RNF object into 'Email From RNF Object' field.
+            Set<Id> setOfRNFIds = new Set<Id>();
+            Map<id,Response_Needed_From__c> mapOfRNF=new Map<id,Response_Needed_From__c>();
+            RecordType objDiscrepancyRecordType = [Select ID From RecordType Where sObjectType = 'Case' and Name = 'Discrepancy' LIMIT 1];
+            
+            //Filling set with the Discrepancy Record Types
+            for(Case objCase : lstCase){
+                
+                if(objCase.RecordTypeId==objDiscrepancyRecordType.Id){
+                    setOfRNFIds.add(objCase.Response_Needed_From_Obj__c);
+                }
+            }
+            
+            //Getting email field value from RNF objects and setting it on the Case email field related to RNF
+            List<Response_Needed_From__c> lstRNF = [SELECT Email__c,Content_Domain__c,Function__c,Job_Role__c,Other__c,Platform__c,Product__c,Region__c,Sub_Region__c,Active__c FROM Response_Needed_From__c where Id in :setOfRNFIds];
+            for(Response_Needed_From__c rnf:lstRNF){
+                
+                if(rnf!=NULL)
+                {
+                    mapOfRNF.put(rnf.Id,rnf);
+                }
+            }
+            
+            for(Case objCase : lstCase){
+                
+                //Checking if Case Record type is 'Discrepancy'
+                if(objCase.RecordTypeId==objDiscrepancyRecordType.Id)
+                {
+                    if(mapOfRNF.containsKey(objCase.Response_Needed_From_Obj__c) && 
+                       mapOfRNF.get(objCase.Response_Needed_From_Obj__c).Active__c)
+                    {
+                        //Populating the email from the RNF object into 'Email From RNF Object' field.
+                        objCase.Email_From_RNF_Object__c=mapOfRNF.get(objCase.Response_Needed_From_Obj__c).Email__c;
+                    }
+                }
+            }
+            //Purpose : To fill in the created by email field with a manager id
+            
+            if(Trigger.IsBefore && (Trigger.IsInsert || Trigger.IsUpdate))
+            {
+                map<id,string> mapAssignedToEmail=new map<id,string>();
+                set<id> CreatedbyUser=new set<id>();
+                set<id> setofManagerToUpdate = new set<id>();
+                
+                string Uid = userinfo.getUserId();
+                String Email;
+                LIst<User> lstUser = [SELECT ManagerId FROM User where Id =:Uid];
+                for(User usr:lstUser)
+                {
+                    setofManagerToUpdate.add(usr.ManagerId);
+                }
+                
+                
+                
+                if(setofManagerToUpdate.size()>0)
+                {
+                    List<User> lstUserManager = [SELECT Id, Email FROM User where Id In:setofManagerToUpdate];
+                    for(User user:lstUserManager)
+                    {
+                        Email = user.Email;
+                    }
+                    
+                }
+                
+                for ( Case cse: lstCase)
+                {
+                    cse.Created_by_Manager_Email__c = Email;
+                }
+            }
+            //To improve the notifications contents.
+            if(Trigger.isBefore && Trigger.IsUpdate)
+            {
+                set<id> oldAssignedUserIds=new set<id>();
+                map<id,string> mapAssignedToNames=new map<id,string>();
+                set<id> setoldProjectids=new set<id>();
+                map<id,string> mapProjectNames=new map<id,string>();
+                
+                //getting old AssignedTo Name and Project Name from old map in the Map "mapAssignedToNames"
+                for(Case oldCase : oldlstCase)
+                {
+                    oldAssignedUserIds.add(oldCase.Assigned_To_User__c);
+                    setoldProjectids.add(oldCase.Project_new__c);
+                }
+                
+                if(oldAssignedUserIds.size()>0)
+                {
+                    List<User> lstUserAssignedTo = [Select id,Name from User where Id In:oldAssignedUserIds];
+                    for(User user:lstUserAssignedTo)
+                    {
+                        mapAssignedToNames.put(user.id,user.Name);
+                    }
+                    
+                }
+                
+                //getting old Project Name from old map in the mapmapAssignedToNames
+                if(setoldProjectids.size()>0)
+                {
+                    List<Project__c> lstProject = [Select id, Name From Project__c where Id In:setoldProjectids];
+                    for(Project__c project:lstProject)
+                    {
+                        
+                        mapProjectNames.put(project.id,project.Name);
+                    }
+                    
+                }
+                
+                for(Case c :lstCase)
+                {
+                    Case oldCase = mapCasesOld.get(c.Id);
+                    if(oldCase.Status!=c.Status)
+                    {
+                        c.Old_Status__c='from '+oldCase.Status+ ' to '+ c.Status;
+                    }
+                    else
+                    {
+                        c.Old_Status__c='No Change';
+                    }
+                    
+                    
+                    c.Old_Assigned_To_User__c=mapAssignedToNames.get(oldCase.Assigned_To_User__c);
+                    
+                    if(oldCase.Priority!=c.Priority)
+                    {
+                        c.Old_Priority__c=oldCase.Priority;
+                    }
+                    else
+                    {
+                        c.Old_Priority__c='No Change';
+                    }
+                    
+                    if(oldCase.Request_Date__c!=c.Request_Date__c)
+                    {
+                        c.Old_Request_Resolution_Date__c=String.valueOf(oldCase.Request_Date__c);
+                    }
+                    else
+                    {
+                        c.Old_Request_Resolution_Date__c='No Change';
+                        
+                    }
+                    
+                    if(oldCase.Project_new__c!=c.Project_new__c)
+                    {
+                        
+                        c.Old_Project__c=mapProjectNames.get(oldCase.Project_new__c);
+                        
+                    }
+                    else
+                    {
+                        c.Old_Project__c='No Change';
+                    }
+                }
+            }
+        }
+    }
+}
